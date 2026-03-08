@@ -39,7 +39,7 @@ jobs:
         run: esphome compile TempHumidPres.yaml
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: firmware-v${{ github.run_number }}
           path: .esphome/build/air-quality-sensor/.pioenvs/air-quality-sensor/firmware.factory.bin
