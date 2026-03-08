@@ -1,0 +1,160 @@
+esphome:
+  name: "air-quality-sensor"
+  friendly_name: Air quality
+  on_boot:
+    - priority: 600
+      then:
+        - logger.log: "=== Firmware Version: v 0.1.0 ==="
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret AirQuality_api_key
+
+ota:
+  - platform: esphome
+    password: !secret AirQuality_ota_password
+
+safe_mode:
+  # Shortens the post-flash built-in sleep prevention window from 5 mins down to 1 min
+  # This provides a 60 second window to flash again if the new code drops off Wi-Fi immediately
+  reboot_timeout: 1min
+
+# ----------------- DEEP SLEEP CONFIGURATION -----------------
+deep_sleep:
+  id: deep_sleep_1
+  # Set the sleep duration to 30 minutes.
+  sleep_duration: 30min
+  # Hardware fail-safe: Force device to sleep exactly 30s after booting to protect battery if logic/connectivity fails.
+  run_duration: 30s
+  # Optional: If you want a pin to wake the device earlier (e.g., a button), uncomment this.
+  # wakeup_pin:
+  #   number: GPIO0
+  #   mode: INPUT_PULLUP
+  #   inverted: true
+
+wifi:
+  networks:
+    - ssid: !secret wifi_ssid
+      password: !secret wifi_password
+
+    - ssid: !secret 2_wifi_ssid
+      password: !secret 2_wifi_password
+
+    - ssid: !secret 3_wifi_ssid
+      password: !secret 3_wifi_password
+
+    # Set a low power save mode to speed up the connection when waking up
+  power_save_mode: LIGHT
+  
+  # Automatically reboot the ESP if Wi-Fi hasn't connected or is down for 3 minutes
+  reboot_timeout: 3min
+# --- CRITICAL AUTOMATION: SLEEP AFTER CONNECTION ---
+  on_connect:
+    then:
+      # Wait until the API connection is fully established.
+      - wait_until: api.connected
+      # Immediately prevent the hardware run_duration timer from firing
+      # while we evaluate the HA switch state.
+      - deep_sleep.prevent: deep_sleep_1
+      # Delay for 3 seconds to allow wireless streaming consoles time to attach to the output
+      - delay: 3s
+      - logger.log:
+          format: "=== Firmware Version: v 0.1.0 ==="
+          level: INFO
+      - logger.log: "API Connected! Re-evaluating HA OTA target switch."
+      # Check the HA switch immediately - no need to wait if we're going to sleep
+      - if:
+          condition:
+            binary_sensor.is_on: ota_mode_ha
+          then:
+            # Switch is ON: stay awake for OTA. on_state will handle sleep when toggled off.
+            - logger.log: "Keep Sensors Awake is ON. Staying awake for OTA!"
+          else:
+            # Switch is OFF: no need to wait, go directly to sleep
+            - logger.log: "Keep Sensors Awake is OFF. Entering Deep Sleep immediately."
+            - deep_sleep.allow: deep_sleep_1
+            - deep_sleep.enter: deep_sleep_1
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "AirQuality Fallback Hotspot"
+    password: !secret AirQuality_ap_password
+
+switch:
+  - platform: gpio
+    pin: GPIO20   # PWR (3.3V) Pin for BME280
+    id: pwr_pin_sensor
+    restore_mode: ALWAYS_ON  # ensures HIGH at boot
+
+  - platform: gpio
+    pin: GPIO10   # GND Pin for BME280 
+    id: gnd_pin_sensor
+    restore_mode: ALWAYS_OFF  # ensures LOW at boot
+
+binary_sensor:
+  # Reads the Global Helper Switch from Home Assistant
+  - platform: homeassistant
+    id: ota_mode_ha
+    entity_id: input_boolean.keep_sensors_awake
+    on_state:
+      then:
+        - if:
+            # If the switch was just turned OFF, go to sleep immediately
+            condition:
+              lambda: 'return !x;'
+            then:
+              - logger.log: "HA OTA Bypassed deactivated. Going to sleep."
+              - deep_sleep.allow: deep_sleep_1
+              - deep_sleep.enter: deep_sleep_1
+
+i2c:
+  sda: 8
+  scl: 9
+  scan: true
+  id: bus_a
+
+sensor:
+  - platform: bme280_i2c
+    temperature:
+      name: "Temperature"
+      oversampling: 16x
+      filters:
+        # Calibration offset (currently raw value)
+        - lambda: return x;
+      unit_of_measurement: "°C"
+    humidity:
+      name: "Humidity"
+      oversampling: 16x
+      filters:
+        # Calibration offset (+4.5%)
+        - lambda: return x+4.5;
+      unit_of_measurement: "%"
+    pressure:
+      name: "Pressure"
+      accuracy_decimals: 0
+      oversampling: 16x
+      filters:
+        - round: 1
+        - lambda: return x;      
+      unit_of_measurement: "hPa"
+    address: 0x76
+    # 30-minute interval prevents redundant sensor reads while staying awake
+    update_interval: 1800s
+
+  # This built-in sensor directly reports the time since the device last booted,
+  # replacing the complex template sensor and resolving the ID error.
+  - platform: uptime
+    id: uptime_sensor
+    name: "Deep Sleep Uptime"
+    # It only needs to update once on boot before sleeping, so we set a long interval.
+    # Uptime will be reported in seconds by default, which is perfect for this use case.
+    update_interval: 10min
