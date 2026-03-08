@@ -51,16 +51,32 @@ Unlike always-on sensors, HASensors is purpose-built around deep sleep to maximi
 | Sensor | BME280 (I²C, address `0x76`) |
 | Power | LiPo battery + TP4056 charger module |
 
-### Pin Mapping
+### Wiring Diagram (ASCII)
 
-| GPIO | Function |
-|------|----------|
-| GPIO8 | I²C SDA (BME280) |
-| GPIO9 | I²C SCL (BME280) |
-| GPIO20 | BME280 VCC (3.3V) |
-| GPIO10 | BME280 GND |
+```text
+     ESP32-C3 DevKitM-1                  BME280 Module
+  +------------------------+           +--------------+
+  |   GPIO20 (PWR)  -------+-----------+-> VCC        |
+  |   GPIO10 (GND)  -------+-----------+-> GND        |
+  |   GPIO8  (SDA)  -------+-----------+-> SDA        |
+  |   GPIO9  (SCL)  -------+-----------+-> SCL        |
+  |                        |           |   SDO --> GND| (addr 0x76)
+  +------------------------+           +--------------+
+```
 
-> **Note**: GPIO8 and GPIO9 are ESP32-C3 strapping pins — use with care and avoid external pull-up/down resistors.
+> **Note**: GPIO20 and GPIO10 are used as software-controlled power rails for the BME280.
+> GPIO20 is configured `ALWAYS_ON` (outputs 3.3V) and GPIO10 is `ALWAYS_OFF` (outputs GND).
+> This allows future software power-cycling of the sensor if needed.
+
+### Pin Mapping Table
+
+| ESP32-C3 Pin | BME280 Pin | Type | Notes |
+| :--- | :--- | :--- | :--- |
+| **GPIO20** | VCC | Power | Software-controlled 3.3V (`ALWAYS_ON`) |
+| **GPIO10** | GND | Power | Software-controlled GND (`ALWAYS_OFF`) |
+| **GPIO8** | SDA | I²C Data | ⚠️ Strapping pin — no external pull-down |
+| **GPIO9** | SCL | I²C Clock | ⚠️ Strapping pin — no external pull-down |
+| — | SDO → GND | Address select | Sets I²C address to `0x76` |
 
 ---
 
