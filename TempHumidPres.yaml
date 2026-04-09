@@ -6,6 +6,16 @@ esphome:
       then:
         - logger.log: "=== Firmware Version: v 0.1.0 ==="
 
+# ------------- GLOBAL STATE -------------
+globals:
+  # Sensor readings are BLOCKED by default from the moment of boot.
+  # They are only unblocked explicitly right before a normal deep sleep,
+  # ensuring no reading can slip through before HA has confirmed the switch state.
+  - id: sensor_readings_blocked
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+
 esp32:
   board: esp32-c3-devkitm-1
   framework:
@@ -76,11 +86,19 @@ wifi:
           condition:
             binary_sensor.is_on: ota_mode_ha
           then:
-            # Switch is ON: stay awake for OTA. on_state will handle sleep when toggled off.
-            - logger.log: "Keep Sensors Awake is ON. Staying awake for OTA!"
+            # Switch is ON: keep sensor_readings_blocked = true (the default). Stay awake for OTA.
+            - logger.log: "Keep Sensors Awake is ON. Sensor readings are BLOCKED to prevent self-heating. Staying awake for OTA!"
           else:
-            # Switch is OFF: no need to wait, go directly to sleep
-            - logger.log: "Keep Sensors Awake is OFF. Entering Deep Sleep immediately."
+            # Switch is OFF: unblock → manually read the sensor → publish → sleep.
+            # update_interval is 'never' so we MUST trigger it here; the device is
+            # asleep long before any auto-timer would have fired.
+            - logger.log: "Keep Sensors Awake is OFF. Reading sensors then sleeping."
+            - globals.set:
+                id: sensor_readings_blocked
+                value: 'false'
+            - component.update: bme280_sensor
+            # Give the sensor time to measure and publish before we cut power.
+            - delay: 2s
             - deep_sleep.allow: deep_sleep_1
             - deep_sleep.enter: deep_sleep_1
 
@@ -113,6 +131,8 @@ binary_sensor:
               lambda: 'return !x;'
             then:
               - logger.log: "HA OTA Bypassed deactivated. Going to sleep."
+              # Do NOT unblock readings here — device was in awake/OTA mode, which
+              # means the sensor has been self-heating. Block readings until next boot.
               - deep_sleep.allow: deep_sleep_1
               - deep_sleep.enter: deep_sleep_1
 
@@ -128,15 +148,26 @@ sensor:
       name: "Temperature"
       oversampling: 16x
       filters:
-        # Calibration offset (currently raw value)
-        - lambda: return x;
+        # sensor_readings_blocked starts TRUE at boot and is only cleared to false
+        # right before a normal deep sleep. This prevents any early or warm readings
+        # from being published, regardless of when the BME280 update() fires.
+        - lambda: |-
+            if (id(sensor_readings_blocked)) {
+              ESP_LOGW("bme280", "Temperature reading BLOCKED (keep-awake or early-boot)");
+              return NAN;
+            }
+            return x;
       unit_of_measurement: "°C"
     humidity:
       name: "Humidity"
       oversampling: 16x
       filters:
-        # Calibration offset (+4.5%)
-        - lambda: return x+4.5;
+        - lambda: |-
+            if (id(sensor_readings_blocked)) {
+              ESP_LOGW("bme280", "Humidity reading BLOCKED (keep-awake or early-boot)");
+              return NAN;
+            }
+            return x + 4.5;
       unit_of_measurement: "%"
     pressure:
       name: "Pressure"
@@ -144,11 +175,20 @@ sensor:
       oversampling: 16x
       filters:
         - round: 1
-        - lambda: return x;      
+        - lambda: |-
+            if (id(sensor_readings_blocked)) {
+              ESP_LOGW("bme280", "Pressure reading BLOCKED (keep-awake or early-boot)");
+              return NAN;
+            }
+            return x;
       unit_of_measurement: "hPa"
     address: 0x76
-    # 30-minute interval prevents redundant sensor reads while staying awake
-    update_interval: 1800s
+    id: bme280_sensor
+    # Never auto-update — the sensor is triggered manually in the on_connect
+    # automation only when the keep-awake switch is OFF. This ensures:
+    #   • Normal boot: reads once, publishes, sleeps.
+    #   • Keep-awake boot: never reads (self-heating blocked).
+    update_interval: never
 
   # This built-in sensor directly reports the time since the device last booted,
   # replacing the complex template sensor and resolving the ID error.
